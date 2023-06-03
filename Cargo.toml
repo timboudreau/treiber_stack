@@ -8,6 +8,8 @@ description = "A lockless, thread-safe, atomic linked-list."
 readme = "README.md"
 homepage = "https://github.com/timboudreau/treiber_stack"
 repository = "https://github.com/timboudreau/treiber_stack.git"
+keywords = ["lockless", "stack", "treiber", "concurrent"]
+categories = ["concurrency"]
 
 [lib]
 name = "treiber_stack"
