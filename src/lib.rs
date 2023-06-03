@@ -23,7 +23,7 @@
  */
 use arc_swap::ArcSwapOption;
 use std::{
-    fmt::{Debug, Display},
+    fmt::{Debug, Display, Write},
     sync::Arc,
 };
 
@@ -364,6 +364,36 @@ impl<T: Send + Sync + Debug> Debug for TreiberCell<T> {
     }
 }
 
+impl<T: Send + Sync> Display for TreiberStack<T>
+where
+    T: Display,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_char('(')?;
+        if let Some(head) = self.head.load().as_ref() {
+            let mut text = String::new();
+            head.stringify(&mut text);
+            f.write_str(&text)?;
+        }
+        f.write_char(')')
+    }
+}
+
+impl<T: Send + Sync> Debug for TreiberStack<T>
+where
+    T: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_char('(')?;
+        if let Some(head) = self.head.load().as_ref() {
+            let mut text = String::new();
+            head.debugify(&mut text);
+            f.write_str(&text)?;
+        }
+        f.write_char(')')
+    }
+}
+
 #[cfg(test)]
 #[allow(unused_imports, dead_code, clippy::vec_init_then_push)]
 mod treiber_stack_tests {
@@ -405,6 +435,12 @@ mod treiber_stack_tests {
         assert_eq!(4_usize, ts.len());
         assert!(ts.peek().is_some());
         assert_eq!(Some(Arc::new("four")), ts.peek());
+
+        let text = ts.to_string();
+        assert_eq!("(four,three,two,one)", &text);
+
+        let dbg_text = format!("{:?}", ts);
+        assert_eq!("(\"four\",\"three\",\"two\",\"one\")", &dbg_text);
 
         let a = ts.pop();
         assert!(a.is_some());
