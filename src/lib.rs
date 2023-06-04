@@ -92,6 +92,13 @@ impl<T: Send + Sync, I: IntoIterator<Item = J>, J: Into<T>> From<I> for TreiberS
 
 impl<T: Send + Sync> TreiberStack<T> {
     /// Create a new instance with the passed object as the head.
+    ///
+    /// Example:
+    /// ```
+    /// let stack = treiber_stack::TreiberStack::initialized_with(42_usize);
+    /// assert!(!stack.is_empty());
+    /// assert_eq!(42_usize, *stack.peek().unwrap());
+    /// ```
     pub fn initialized_with(item: T) -> Self {
         Self {
             head: ArcSwapOption::new(Some(Arc::new(TreiberCell {
@@ -102,6 +109,18 @@ impl<T: Send + Sync> TreiberStack<T> {
     }
 
     /// Push an item onto the stack, which will become the head.
+    /// Example:
+    ///
+    /// ```
+    /// let stack = treiber_stack::TreiberStack::default();
+    /// assert!(stack.is_empty()); // stack is initially empty
+    /// stack.push(23_usize); // push one element
+    ///
+    /// assert!(!stack.is_empty()); // the stack is not empty
+    ///
+    /// assert_eq!(23_usize, *stack.pop().unwrap()); // pop the element back off
+    /// assert!(stack.is_empty()); // the stack is back to empty
+    /// ```
     pub fn push<I: Into<T>>(&self, val: I) {
         let a = Arc::new(val.into());
         self.head.rcu(|old| {
@@ -118,6 +137,16 @@ impl<T: Send + Sync> TreiberStack<T> {
     }
 
     /// Pop the head item from this stack.
+    ///
+    /// Example:
+    /// ```
+    /// let stack = treiber_stack::TreiberStack::from(vec![3_usize, 2, 1]);
+    /// assert_eq!(1_usize, *stack.pop().unwrap());
+    /// assert_eq!(2_usize, *stack.pop().unwrap());
+    /// assert_eq!(3_usize, *stack.pop().unwrap());
+    /// assert_eq!(None, stack.pop());
+    /// assert!(stack.is_empty());
+    /// ```
     pub fn pop(&self) -> Option<Arc<T>> {
         let popped = self.head.rcu(|old| match old {
             Some(curr_head) => {
@@ -138,7 +167,39 @@ impl<T: Send + Sync> TreiberStack<T> {
         }
     }
 
-    /// Determine if the stack is empty
+    /// Drain items from this Treiber stack, repeatedly calling the passed `FnMut` with
+    /// each item until it returns false, returning the number of elements passed to
+    /// `f`.
+    ///
+    /// Example:
+    ///
+    /// ```
+    /// let stack = treiber_stack::TreiberStack::from(vec![6_usize, 5, 4, 3, 2, 1]);
+    /// let mut v = Vec::with_capacity(6);
+    /// stack.drain_into(|item| {
+    ///     v.push(*item);
+    ///     *item < 3
+    /// });
+    /// assert_eq!(vec![1, 2, 3], v);
+    /// assert_eq!(3, stack.len());
+    /// assert_eq!(vec![4_usize, 5, 6], stack.drain_transforming(|item| *item));
+    /// ```
+    pub fn drain_into<F: FnMut(Arc<T>) -> bool>(&self, mut f: F) -> usize {
+        let mut processed = 0_usize;
+        loop {
+            if let Some(item) = self.pop() {
+                processed += 1;
+                if !f(item) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        processed
+    }
+
+    /// Determine if the stack currently contains no elements
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.head.load_full().is_none()
@@ -153,13 +214,27 @@ impl<T: Send + Sync> TreiberStack<T> {
         }
     }
 
-    /// Discard the contents of this stack.
+    /// Discard the contents of this stack
+    ///
+    /// Example:
+    /// ```
+    /// let stack : treiber_stack::TreiberStack<usize> = treiber_stack::TreiberStack::from(vec![1_usize, 2, 3]);
+    /// assert_eq!(3, stack.len());
+    /// stack.clear();
+    /// assert_eq!(0, stack.len());
+    /// ```
     pub fn clear(&self) {
         self.head.store(None);
     }
 
     /// Determine if any element contained in this stack matches the passed
     /// predicate.
+    /// Example:
+    /// ```
+    /// let stack : treiber_stack::TreiberStack<usize> = treiber_stack::TreiberStack::from(vec![1_usize, 2, 3]);
+    /// assert!(stack.contains(|item| *item == 2));
+    /// assert!(!stack.contains(|item| *item == 23));
+    /// ```
     pub fn contains<F: FnMut(&T) -> bool>(&self, mut predicate: F) -> bool {
         if let Some(head) = self.head.load_full().as_ref() {
             predicate(&head.value) || {
@@ -185,6 +260,14 @@ impl<T: Send + Sync> TreiberStack<T> {
     /// to do during process shutdown), use a while loop testing emptiness for some
     /// period of time after initiating shutdown and ensuring no further items can be
     /// added.
+    /// Example:
+    /// ```
+    /// let stack = treiber_stack::TreiberStack::from(vec![3_usize, 2, 1]);
+    /// let drained = stack.drain();
+    /// assert_eq!(vec![std::sync::Arc::new(1_usize),
+    ///     std::sync::Arc::new(2_usize),
+    ///     std::sync::Arc::new(3_usize)], drained);
+    /// ```
     pub fn drain(&self) -> Vec<Arc<T>> {
         if let Some(head) = self.head.swap(None) {
             let mut result = Vec::new();
@@ -202,6 +285,16 @@ impl<T: Send + Sync> TreiberStack<T> {
 
     /// Empty this stack, returning a `Vec` of its contents, replacing the head with the
     /// passed value in a single atomic swap.
+    /// Example:
+    /// ```
+    /// let stack = treiber_stack::TreiberStack::from(vec![3_usize, 2, 1]);
+    /// let drained = stack.drain_replace(52);
+    /// assert_eq!(vec![std::sync::Arc::new(1_usize),
+    ///     std::sync::Arc::new(2_usize),
+    ///     std::sync::Arc::new(3_usize)], drained);    
+    /// assert_eq!(1, stack.len());
+    /// assert_eq!(52, *stack.pop().unwrap());
+    /// ```
     pub fn drain_replace(&self, new_head: T) -> Vec<Arc<T>> {
         if let Some(head) = self.head.swap(Some(Arc::new(TreiberCell {
             value: Arc::new(new_head),
@@ -223,6 +316,13 @@ impl<T: Send + Sync> TreiberStack<T> {
     /// Empty this stack, using the passed function to transform the values encountered, and
     /// returning a Vec of the result.  Note that the resulting `Vec` will be in reverse order
     /// that elements were added, in LIFO order.
+    /// ```
+    /// let stack : treiber_stack::TreiberStack<usize>
+    ///     = treiber_stack::TreiberStack::from(vec![3_usize, 2, 1]);
+    /// let drained = stack.drain_transforming(|item| *item * 10);
+    /// assert_eq!(vec![10_usize, 20, 30], drained);
+    /// assert!(stack.is_empty());
+    /// ```
     pub fn drain_transforming<R, F: FnMut(Arc<T>) -> R>(&self, mut transform: F) -> Vec<R> {
         if let Some(head) = self.head.swap(None) {
             let mut result = Vec::new();
@@ -239,6 +339,16 @@ impl<T: Send + Sync> TreiberStack<T> {
     }
 
     /// Take a snapshot of the contents *without altering the stack or removing entries*.
+    /// Example:
+    /// ```
+    /// let stack = treiber_stack::TreiberStack::from(vec![3_usize, 2, 1]);
+    /// let snapshot = stack.snapshot();
+    /// assert_eq!(vec![std::sync::Arc::new(1_usize),
+    ///     std::sync::Arc::new(2_usize),
+    ///     std::sync::Arc::new(3_usize)], snapshot);    
+    /// assert_eq!(3, stack.len());
+    /// assert_eq!(1_usize, *stack.pop().unwrap());
+    /// ```
     pub fn snapshot(&self) -> Vec<Arc<T>> {
         if let Some(head) = self.head.load_full().as_ref() {
             let mut result = Vec::new();
@@ -250,6 +360,16 @@ impl<T: Send + Sync> TreiberStack<T> {
     }
 
     /// Retrieve a copy of the head element of the stack without altering the stack.
+    /// Example:
+    /// ```
+    /// let stack = treiber_stack::TreiberStack::from(vec![2_usize, 1]);
+    /// assert_eq!(1_usize, *stack.peek().unwrap()); // should be the last added element
+    /// assert_eq!(1_usize, *stack.pop().unwrap()); // head should be unaltered
+    ///
+    /// assert_eq!(2_usize, *stack.peek().unwrap()); // now 2 is the head
+    /// assert_eq!(2_usize, *stack.pop().unwrap()); // pop that
+    /// assert_eq!(None, stack.peek()); // nothing to peek at
+    /// ```
     pub fn peek(&self) -> Option<Arc<T>> {
         if let Some(head) = self.head.load_full() {
             Some(head.value.clone())
@@ -260,6 +380,19 @@ impl<T: Send + Sync> TreiberStack<T> {
 
     /// Create an iterator over this stack.  The snapshot the iterator will use is fixed at
     /// the time of creation.
+    ///
+    /// Example:
+    /// ```
+    /// let stack = treiber_stack::TreiberStack::from(vec![2_usize, 1]);
+    /// let mut copied_out = Vec::with_capacity(2);
+    /// // Pushing new items will *not* cause them to be visible in this iterator
+    /// for item in stack.iter() {
+    ///     stack.push(*item * 10);
+    ///     copied_out.push(*item);
+    /// }
+    /// // But they will now be present in the stack
+    /// assert_eq!(vec![20_usize, 10_usize, 1_usize, 2_usize], stack.drain_transforming(|item| *item));
+    /// ```    
     pub fn iter(&self) -> TreiberStackIterator<T> {
         TreiberStackIterator {
             curr: self.head.load().clone(),
@@ -483,6 +616,31 @@ mod treiber_stack_tests {
             vv.push(*item);
         }
         assert_eq!(vec![1, 2, 3, 4, 5, 6], vv);
+    }
+
+    #[test]
+    fn test_pop_fn() {
+        let stack: TreiberStack<usize> = TreiberStack::from(vec![6_usize, 5, 4, 3, 2, 1]);
+        let mut v = Vec::with_capacity(6);
+        stack.drain_into(|item| {
+            v.push(*item);
+            true
+        });
+        assert_eq!(6, v.len());
+        assert_eq!(vec![1, 2, 3, 4, 5, 6], v);
+    }
+
+    #[test]
+    fn test_pop_fn_filter() {
+        let stack: TreiberStack<usize> = TreiberStack::from(vec![6_usize, 5, 4, 3, 2, 1]);
+        let mut v = Vec::with_capacity(6);
+        stack.drain_into(|item| {
+            v.push(*item);
+            *item < 3
+        });
+        assert_eq!(vec![1, 2, 3], v);
+        assert_eq!(3, stack.len());
+        assert_eq!(vec![4_usize, 5, 6], stack.drain_transforming(|item| *item));
     }
 
     #[test]
