@@ -10,7 +10,7 @@ you can't afford blocking the thread in question due to contention.
 
 To use, simply add to your `Cargo.toml`
 
-`treiber_stack = "0.1.0"`
+`treiber_stack = "1.0.2"`
 
 Check the latest version, but this library is unlikely to be updated often if ever - it
 is a simple data structure.
