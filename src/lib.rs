@@ -123,6 +123,15 @@ impl<T: Send + Sync> TreiberStack<T> {
     /// ```
     pub fn push<I: Into<T>>(&self, val: I) {
         let a = Arc::new(val.into());
+        self.push_arc(a);
+    }
+
+    /// Push an extant `Arc` onto the stack, which will become the head.
+    /// This method is useful for cases where values are swapped between
+    /// `TreiberStack`s or examined and replaced, making cloning the value
+    /// out of the `Arc` just to have it put in a new `Arc` when it is pushed
+    /// adds overhead.
+    pub fn push_arc(&self, a: Arc<T>) {
         self.head.rcu(|old| {
             if let Some(curr_head) = old {
                 let new_head = prepend(curr_head.clone(), a.clone());
@@ -141,6 +150,7 @@ impl<T: Send + Sync> TreiberStack<T> {
     /// Example:
     /// ```
     /// let stack = treiber_stack::TreiberStack::from(vec![3_usize, 2, 1]);
+    /// assert_eq!(3, stack.len());
     /// assert_eq!(1_usize, *stack.pop().unwrap());
     /// assert_eq!(2_usize, *stack.pop().unwrap());
     /// assert_eq!(3_usize, *stack.pop().unwrap());
@@ -162,6 +172,28 @@ impl<T: Send + Sync> TreiberStack<T> {
         if let Some(v) = popped {
             let result = Some(v.value.clone());
             result
+        } else {
+            None
+        }
+    }
+
+    /// Pop a value, if any, taking it out of the Arc it is stored in internally.
+    /// Only available when `T: Copy`.
+    /// Example:
+    /// ```
+    /// let stack : treiber_stack::TreiberStack<usize> = treiber_stack::TreiberStack::from(vec![3_usize, 2, 1]);
+    /// assert_eq!(Some(1_usize), stack.pop_raw());
+    /// assert_eq!(Some(2_usize), stack.pop_raw());
+    /// assert_eq!(Some(3_usize), stack.pop_raw());
+    /// assert!(stack.pop_raw().is_none());
+    /// assert!(stack.is_empty());
+    /// ```
+    pub fn pop_raw(&self) -> Option<T>
+    where
+        T: Copy,
+    {
+        if let Some(result) = self.pop() {
+            Some(*result)
         } else {
             None
         }
@@ -397,6 +429,26 @@ impl<T: Send + Sync> TreiberStack<T> {
         TreiberStackIterator {
             curr: self.head.load().clone(),
         }
+    }
+
+    /// Swap the head nodes between two `TreiberStack`s of the same type.
+    ///
+    /// Example:
+    /// ```
+    /// let a : treiber_stack::TreiberStack<usize> = treiber_stack::TreiberStack::from(vec![3_usize, 2, 1]);
+    /// let b : treiber_stack::TreiberStack<usize> = treiber_stack::TreiberStack::from(vec![6_usize, 5, 4]);
+    /// a.swap_contents(&b);
+    /// assert_eq!(4, a.pop_raw().unwrap());
+    /// assert_eq!(5, a.pop_raw().unwrap());
+    /// assert_eq!(6, a.pop_raw().unwrap());
+    /// assert!(a.is_empty());
+    /// assert_eq!(1, b.pop_raw().unwrap());
+    /// assert_eq!(2, b.pop_raw().unwrap());
+    /// assert_eq!(3, b.pop_raw().unwrap());
+    /// assert!(b.is_empty());
+    /// ```
+    pub fn exchange_contents(&self, other: &Self) {
+        let _ = self.head.rcu(|my_head| other.head.rcu(|_| my_head.clone()));
     }
 }
 
