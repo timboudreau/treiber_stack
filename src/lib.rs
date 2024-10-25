@@ -199,6 +199,68 @@ impl<T: Send + Sync> TreiberStack<T> {
         }
     }
 
+    /// Drain *all* items from this Treiber stack, repeatedly calling the passed `FnMut` with
+    /// each item, returning the number of elements passed to `f`.  The head of the stack
+    /// is replaced by an empty cell at the start of this method, so any concurrent write
+    /// operations will not be reflected in the set of elements passed to `f`, and there
+    /// should be no expectation that the stack is actually empty under concurrency at
+    /// the end of this call.  Prefer this method to `drain_into()` where the stack
+    /// should be emptied, as it cannot encounter contention after the initial head-swap.
+    ///
+    /// Example:
+    ///
+    /// ```
+    /// let stack: treiber_stack::TreiberStack<usize> = treiber_stack::TreiberStack::from(vec![6_usize, 5, 4, 3, 2, 1]);
+    /// let mut v = Vec::with_capacity(6);
+    /// stack.drain_all_into(|item| {
+    ///     v.push(*item);
+    /// });
+    /// assert_eq!(vec![1, 2, 3, 4, 5, 6], v);
+    /// ```
+    pub fn drain_all_into<F: FnMut(Arc<T>)>(&self, mut f: F) -> usize {
+        let mut head = self.head.swap(None);
+        let mut processed = 0_usize;
+        while let Some(curr) = head {
+            f(curr.value.clone());
+            processed += 1;
+            head = curr.next.clone()
+        }
+        processed
+    }
+
+    /// Drain *all* items from this Treiber stack, where items are `Copy` and can be removed
+    /// from an `Arc`, repeatedly calling the passed `FnMut` with
+    /// each item, returning the number of elements passed to `f`.  The head of the stack
+    /// is replaced by an empty cell at the start of this method, so any concurrent write
+    /// operations will not be reflected in the set of elements passed to `f`, and there
+    /// should be no expectation that the stack is actually empty under concurrency at
+    /// the end of this call.
+    ///
+    /// Example:
+    ///
+    /// ```
+    /// let stack: treiber_stack::TreiberStack<usize>  = treiber_stack::TreiberStack::from(vec![6_usize, 5, 4, 3, 2, 1]);
+    /// let mut v = Vec::with_capacity(6);
+    /// stack.drain_all_into(|item| {
+    ///     v.push(*item);
+    /// });
+    /// assert_eq!(vec![1, 2, 3, 4, 5, 6], v);
+    /// ```
+    pub fn drain_all_copy<F: FnMut(T)>(&self, mut f: F) -> usize
+    where
+        T: Copy,
+    {
+        let mut head = self.head.swap(None);
+        let mut processed = 0_usize;
+        while let Some(curr) = head {
+            let val = *curr.value;
+            f(val);
+            processed += 1;
+            head = curr.next.clone()
+        }
+        processed
+    }
+
     /// Drain items from this Treiber stack, repeatedly calling the passed `FnMut` with
     /// each item until it returns false, returning the number of elements passed to
     /// `f`.
@@ -437,7 +499,7 @@ impl<T: Send + Sync> TreiberStack<T> {
     /// ```
     /// let a : treiber_stack::TreiberStack<usize> = treiber_stack::TreiberStack::from(vec![3_usize, 2, 1]);
     /// let b : treiber_stack::TreiberStack<usize> = treiber_stack::TreiberStack::from(vec![6_usize, 5, 4]);
-    /// a.swap_contents(&b);
+    /// a.exchange_contents(&b);
     /// assert_eq!(4, a.pop_raw().unwrap());
     /// assert_eq!(5, a.pop_raw().unwrap());
     /// assert_eq!(6, a.pop_raw().unwrap());
