@@ -646,8 +646,9 @@ where
 mod treiber_stack_tests {
     use std::{
         fmt::Display,
+        ops::Range,
         sync::{atomic::AtomicUsize, Arc},
-        thread,
+        thread::{self, JoinHandle},
     };
 
     use super::TreiberStack;
@@ -824,5 +825,59 @@ mod treiber_stack_tests {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str(self.value.to_string().as_str())
         }
+    }
+
+    #[test]
+    fn test_batches() {
+        const THREADS: usize = 12;
+        const ITEMS: usize = 15000;
+        let ts: Arc<TreiberStack<usize>> = Default::default();
+
+        fn run_range(rng: Range<usize>, stack: Arc<TreiberStack<usize>>) -> JoinHandle<()> {
+            std::thread::spawn(move || {
+                for i in rng {
+                    stack.push(i);
+                }
+            })
+        }
+
+        fn ranges() -> Vec<Range<usize>> {
+            let mut result = Vec::with_capacity(THREADS);
+            for i in 0..THREADS {
+                let start = i * ITEMS;
+                let end = start + ITEMS;
+                result.push(start..end);
+            }
+            result
+        }
+
+        let mut handles = Vec::new();
+        for range in ranges() {
+            handles.push(run_range(range, ts.clone()));
+        }
+        for h in handles {
+            h.join();
+        }
+        let mut all = ts.drain();
+
+        /*
+        // For debugging
+        for i in (all.as_slice()[0..600]).iter() {
+            print!("{}, ", i);
+        }
+        */
+
+        all.sort();
+        let mut prev: Option<usize> = None;
+        for item in all.iter() {
+            let item = **item;
+            if let Some(p) = prev {
+                if p != item - 1 {
+                    println!("Discontinuity: {} - {}", p, item);
+                }
+            }
+            prev = Some(item);
+        }
+        assert_eq!(THREADS * ITEMS, all.len(), "Size mismatch");
     }
 }
