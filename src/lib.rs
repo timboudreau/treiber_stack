@@ -23,7 +23,7 @@
  */
 use arc_swap::ArcSwapOption;
 use std::{
-    fmt::{Debug, Display, Write}, ops::Deref, sync::Arc,
+    fmt::{Debug, Display, Write}, sync::Arc,
 };
 
 // Convenience type
@@ -132,7 +132,7 @@ impl<T: Send + Sync> TryInto<Vec<T>> for TreiberStack<T> {
                         Err(e) => {
                             let new_cell = TreiberCell {
                                 value: e,
-                                next : next,
+                                next,
                             };
                             let remainder: TreiberStack<T> = TreiberStack {
                                 head: ArcSwapOption::new(Some(Arc::new(new_cell))),
@@ -154,7 +154,7 @@ impl<T: Send + Sync> TryInto<Vec<T>> for TreiberStack<T> {
                 },
             }
         }
-        return Ok(result);
+        Ok(result)
     }
 }
 
@@ -255,21 +255,11 @@ impl<T: Send + Sync> TreiberStack<T> {
     pub fn pop(&self) -> Option<Arc<T>> {
         let popped = self.head.rcu(|old| match old {
             Some(curr_head) => {
-                let mm = curr_head.next.clone();
-                if let Some(old_next) = mm {
-                    Some(old_next)
-                } else {
-                    None
-                }
+                curr_head.next.clone()
             }
             None => None,
         });
-        if let Some(v) = popped {
-            let result = Some(v.value.clone());
-            result
-        } else {
-            None
-        }
+        popped.map(|v| v.value.clone())
     }
 
     /// Pop a value, if any, taking it out of the Arc it is stored in internally.
@@ -287,11 +277,7 @@ impl<T: Send + Sync> TreiberStack<T> {
     where
         T: Copy,
     {
-        if let Some(result) = self.pop() {
-            Some(*result)
-        } else {
-            None
-        }
+        self.pop().map(|result| *result)
     }
 
     /// Drain *all* items from this Treiber stack, repeatedly calling the passed `FnMut` with
@@ -375,13 +361,9 @@ impl<T: Send + Sync> TreiberStack<T> {
     /// ```
     pub fn drain_into<F: FnMut(Arc<T>) -> bool>(&self, mut f: F) -> usize {
         let mut processed = 0_usize;
-        loop {
-            if let Some(item) = self.pop() {
-                processed += 1;
-                if !f(item) {
-                    break;
-                }
-            } else {
+        while let Some(item) = self.pop() {
+            processed += 1;
+            if !f(item) {
                 break;
             }
         }
@@ -560,11 +542,7 @@ impl<T: Send + Sync> TreiberStack<T> {
     /// assert_eq!(None, stack.peek()); // nothing to peek at
     /// ```
     pub fn peek(&self) -> Option<Arc<T>> {
-        if let Some(head) = self.head.load().as_ref() {
-            Some(head.value.clone())
-        } else {
-            None
-        }
+        self.head.load().as_ref().map(|head| head.value.clone())
     }
 
     /// Create an iterator over this stack.  The snapshot the iterator will use is fixed at
@@ -670,7 +648,7 @@ where
         let mut nxt = &self.next;
         while let Some(next) = nxt {
             into.write_char(',')?;
-            into.write_fmt(format_args!("{}", next.value.to_string()))?;
+            into.write_fmt(format_args!("{}", next.value))?;
             nxt = &next.next;
         }
         Ok(())
