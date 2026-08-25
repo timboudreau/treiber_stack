@@ -23,7 +23,8 @@
  */
 use arc_swap::ArcSwapOption;
 use std::{
-    fmt::{Debug, Display, Write}, sync::Arc,
+    fmt::{Debug, Display, Write},
+    sync::Arc,
 };
 
 // Convenience type
@@ -70,7 +71,7 @@ impl<T: Send + Sync> Drop for TreiberCell<T> {
         // cascading Arcs issuing from
         // core::ptr::drop_glue::<alloc::sync::Arc<treiber_stack::TreiberCell<usize>>>
         let mut next = self.next.take();
-        while let Some( n) = next.take() {
+        while let Some(n) = next.take() {
             if let Some(mut n) = Arc::into_inner(n) {
                 next = n.next.take();
             } else {
@@ -128,30 +129,28 @@ impl<T: Send + Sync> TryInto<Vec<T>> for TreiberStack<T> {
                         Ok(val) => {
                             result.push(val);
                             node = next;
-                        },
+                        }
                         Err(e) => {
-                            let new_cell = TreiberCell {
-                                value: e,
-                                next,
-                            };
+                            let new_cell = TreiberCell { value: e, next };
                             let remainder: TreiberStack<T> = TreiberStack {
                                 head: ArcSwapOption::new(Some(Arc::new(new_cell))),
                             };
-                            return Err(IntoInnerError { drained_elements: result, remainder })
-                        },
+                            return Err(IntoInnerError {
+                                drained_elements: result,
+                                remainder,
+                            });
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     let head = ArcSwapOption::from(Some(e));
                     // let head = ArcSwapOption::from_pointee(e);
-                    let unremoved: TreiberStack<T> = TreiberStack {
-                        head,
-                    };
+                    let unremoved: TreiberStack<T> = TreiberStack { head };
                     return Err(IntoInnerError {
                         drained_elements: result,
-                        remainder: unremoved
-                    })
-                },
+                        remainder: unremoved,
+                    });
+                }
             }
         }
         Ok(result)
@@ -165,21 +164,28 @@ impl<T: Send + Sync> TryInto<Vec<T>> for TreiberStack<T> {
 /// existed.
 pub struct IntoInnerError<T: Send + Sync> {
     /// The elements that were removed successfully.
-    pub drained_elements : Vec<T>,
+    pub drained_elements: Vec<T>,
     /// A stack of the remaining elements, including at least one which, at the time of the call,
     /// was still referenced by another cloned arc.
-    pub remainder : TreiberStack<T>,
+    pub remainder: TreiberStack<T>,
 }
 
 impl<T: Send + Sync> Display for IntoInnerError<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("drained-elements: {}, unremovable-elements: {}", self.drained_elements.len(), self.remainder.len()))
+        f.write_fmt(format_args!(
+            "drained-elements: {}, unremovable-elements: {}",
+            self.drained_elements.len(),
+            self.remainder.len()
+        ))
     }
 }
 
 impl<T: Send + Sync> std::fmt::Debug for IntoInnerError<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IntoInnerError").field("drained_elements", &self.drained_elements.len()).field("remainder", &self.remainder.len()).finish()
+        f.debug_struct("IntoInnerError")
+            .field("drained_elements", &self.drained_elements.len())
+            .field("remainder", &self.remainder.len())
+            .finish()
     }
 }
 
@@ -254,9 +260,7 @@ impl<T: Send + Sync> TreiberStack<T> {
     /// ```
     pub fn pop(&self) -> Option<Arc<T>> {
         let popped = self.head.rcu(|old| match old {
-            Some(curr_head) => {
-                curr_head.next.clone()
-            }
+            Some(curr_head) => curr_head.next.clone(),
             None => None,
         });
         popped.map(|v| v.value.clone())
@@ -718,13 +722,13 @@ mod treiber_stack_tests {
     use std::{
         fmt::Display,
         ops::Range,
-        sync::{atomic::AtomicUsize, Arc},
+        sync::{Arc, atomic::AtomicUsize},
         thread::{self, JoinHandle},
     };
 
     use crate::IntoInnerError;
 
-use super::TreiberStack;
+    use super::TreiberStack;
 
     #[test]
     fn test_simple() {
@@ -903,7 +907,9 @@ use super::TreiberStack;
     #[test]
     fn test_batches() {
         // Note this will print output for quite a while if not killed:
-        unsafe { backtrace_on_stack_overflow::enable(); }
+        unsafe {
+            backtrace_on_stack_overflow::enable();
+        }
         const THREADS: usize = 12;
         const ITEMS: usize = 15000;
         let ts: Arc<TreiberStack<usize>> = Default::default();
@@ -953,10 +959,10 @@ use super::TreiberStack;
     fn test_into_item_vec_clean() {
         #[derive(Debug, Eq, PartialEq, Copy, Clone)]
         struct Thing {
-            index : usize,
+            index: usize,
         }
 
-        let orig : [Thing; 5] = std::array::from_fn(|index| Thing { index });
+        let orig: [Thing; 5] = std::array::from_fn(|index| Thing { index });
 
         let stack: TreiberStack<Thing> = TreiberStack::from(orig);
         // Sanity check
@@ -965,25 +971,24 @@ use super::TreiberStack;
             assert_eq!(inv_index, v.index, "Misordered at {} / {}", ix, inv_index);
         }
 
-        let mut v : Vec<Thing> = stack.try_into().expect("Should not be any Arc clones here");
+        let mut v: Vec<Thing> = stack.try_into().expect("Should not be any Arc clones here");
         v.reverse();
 
         assert_eq!(orig.to_vec(), v);
     }
 
-
     #[test]
     fn test_into_item_vec_dirty() {
         #[derive(Debug, Eq, PartialEq, Copy, Clone)]
         struct Thing {
-            index : usize,
+            index: usize,
         }
 
-        let orig : [Thing; 10] = std::array::from_fn(|index| Thing { index });
+        let orig: [Thing; 10] = std::array::from_fn(|index| Thing { index });
 
         let stack: TreiberStack<Thing> = TreiberStack::from(orig);
 
-        let mut hold : Option<Arc<Thing>> = None;
+        let mut hold: Option<Arc<Thing>> = None;
 
         // Sanity check
         for (ix, v) in stack.iter().enumerate() {
@@ -994,13 +999,16 @@ use super::TreiberStack;
             }
         }
 
-        let res : Result<Vec<Thing>, IntoInnerError<Thing>> = stack.try_into();
+        let res: Result<Vec<Thing>, IntoInnerError<Thing>> = stack.try_into();
         // Call hold *after* the conversion so our clone is not dropped.
         assert!(hold.take().is_some());
 
         let err = match res {
             Ok(stuff) => {
-                panic!("Conversion with an outstanding Arc clone should not have succeeded, but got {:?}", stuff)
+                panic!(
+                    "Conversion with an outstanding Arc clone should not have succeeded, but got {:?}",
+                    stuff
+                )
             }
             Err(e) => e,
         };
@@ -1023,7 +1031,10 @@ use super::TreiberStack;
             last_index = e.index;
         }
 
-        let mut rem_vec : Vec<Thing> = err.remainder.try_into().expect("Should now be able to drain the rest");
+        let mut rem_vec: Vec<Thing> = err
+            .remainder
+            .try_into()
+            .expect("Should now be able to drain the rest");
         rem_vec.reverse();
         let portion = (&orig[0..5]).to_vec();
         assert_eq!(portion, rem_vec);
