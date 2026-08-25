@@ -1,7 +1,7 @@
 [package]
 name = "treiber_stack"
-version = "1.1.1"
-edition = "2021"
+version = "1.1.2"
+edition = "2024"
 authors = ["Tim Boudreau <tim@timboudreau.com>"]
 license = "MIT"
 description = "A lockless, thread-safe, atomic linked-list."
@@ -16,4 +16,7 @@ name = "treiber_stack"
 path = "src/lib.rs"
 
 [dependencies]
-arc-swap = "1.7.1"
+arc-swap = "1.9.2"
+
+[dev-dependencies]
+backtrace-on-stack-overflow = "0.3.0"
