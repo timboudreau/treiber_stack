@@ -170,7 +170,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "treiber_stack"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "arc-swap",
  "backtrace-on-stack-overflow",
