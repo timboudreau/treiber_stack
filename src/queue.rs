@@ -74,15 +74,15 @@ mod ord {
 /// `is_empty()` is provided as a convenience for the use case of thread pools that
 /// want to completely drain pending work that may be arriving concurrently.
 ///
-#[derive(Default, Debug)]
-pub struct TreiberQueue<T: Sized + std::fmt::Debug + 'static> {
+#[derive(Debug)]
+pub struct TreiberQueue<T: Sized + 'static> {
     cell: HeadCell,
     _pd: PhantomData<T>,
 }
 
 // This is just a thin wrapper on the underlying `HeadCell` that imposes a consistent
 // type, to keep the front-facing API separate from the implementation.
-impl<T: Sized + std::fmt::Debug + 'static> TreiberQueue<T> {
+impl<T: Sized + 'static> TreiberQueue<T> {
     /// Create a new queue.
     pub const fn new() -> Self {
         Self {
@@ -156,13 +156,19 @@ impl<T: Sized + std::fmt::Debug + 'static> TreiberQueue<T> {
 }
 
 /// Ensures all of the queue contents are dropped.
-impl<T: Sized + std::fmt::Debug + 'static> Drop for TreiberQueue<T> {
+impl<T: Sized + 'static> Drop for TreiberQueue<T> {
     fn drop(&mut self) {
         // ensure the contents are dropped, using `drain()` which iterates rather
         // than recurses, avoiding a stack-overflow if dropping a very large queue.
         while !self.is_empty() {
             let _ = self.drain();
         }
+    }
+}
+
+impl<T: Sized + 'static> Default for TreiberQueue<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -174,7 +180,7 @@ impl<T: Sized + std::fmt::Debug + 'static> Drop for TreiberQueue<T> {
 /// assert_eq!(Some(42), q.pop());
 /// assert!(q.is_empty());
 /// ```
-impl<T: Sized + std::fmt::Debug + 'static> From<T> for TreiberQueue<T> {
+impl<T: Sized + 'static> From<T> for TreiberQueue<T> {
     fn from(value: T) -> Self {
         let result = Self::new();
         result.push(value);
@@ -229,7 +235,7 @@ impl HeadCell {
     }
 
     /// Remove the last inserted item from the queue.
-    fn pop<T: Sized + std::fmt::Debug + 'static>(&self) -> Option<T> {
+    fn pop<T: Sized + 'static>(&self) -> Option<T> {
         let res = self
             .state
             .fetch_update(ord::WRITE_ORDERING, ord::READ_ORDERING, |old| {
@@ -260,12 +266,12 @@ impl HeadCell {
         }
     }
 
-    fn push<T: Sized + std::fmt::Debug + 'static>(&self, val: T) -> bool {
+    fn push<T: Sized + 'static>(&self, val: T) -> bool {
         self.push_boxed::<T>(Box::new(val))
     }
 
     /// Returns true if the cell was empty prior to this call.
-    fn push_boxed<T: Sized + std::fmt::Debug + 'static>(&self, val: Box<T>) -> bool {
+    fn push_boxed<T: Sized + 'static>(&self, val: Box<T>) -> bool {
         // Okay, we immediately leak the value
         let leaked = self.leak_boxed(val);
         // And make a cell with it
@@ -318,7 +324,7 @@ impl HeadCell {
     }
 
     /// Empty the entire contents of the queue.  The result will be in LIFO order.
-    fn drain<T: Sized + std::fmt::Debug + 'static>(&self) -> Vec<T> {
+    fn drain<T: Sized + 'static>(&self) -> Vec<T> {
         let mut result = Vec::<T>::new();
         while !self.is_empty() {
             if let Some(item) = self.pop() {
@@ -328,7 +334,7 @@ impl HeadCell {
         result
     }
 
-    fn drain_no_more_than<T: Sized + std::fmt::Debug + 'static>(&self, n_items: usize) -> Vec<T> {
+    fn drain_no_more_than<T: Sized + 'static>(&self, n_items: usize) -> Vec<T> {
         let mut result = Vec::<T>::new();
         while !self.is_empty() {
             if let Some(item) = self.pop() {
