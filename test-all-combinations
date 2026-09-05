@@ -1,0 +1,27 @@
+#!/bin/bash
+
+ROOT=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+export RUST_BACKTRACE=1
+export RUST_LOG=trace
+
+cd "${ROOT}"
+
+
+# Should do nothing
+cargo test --no-default-features
+
+cargo test --release
+
+cargo test --release -F stack
+
+cargo test --release --no-default-features -F stack
+
+cargo test --release --no-default-features -F queue
+
+cargo test --release --no-default-features -F queue,queue-stats
+
+cargo test --release --no-default-features -F queue,queue-stats,queue-read-relaxed
+
+cargo doc
+
