@@ -9,7 +9,7 @@ This is a handy data structure in any scenario where tasks on multiple threads
 you can't afford blocking the thread in question due to contention.
 
 To use, simply add to your `Cargo.toml`
-`treiber_stack = "1.2.0"`
+`treiber_stack = "1.2.1"`
 
 
 What's Here?
@@ -34,6 +34,7 @@ Differences between the two:
 
 Unless you *need* either the exposed state of `TreiberStack` or have a requirement to avoid directly
 depending on libraries using `unsafe`, `TreiberQueue` is likely to be the more performant choice.
+
 
 Feature Flags
 -------------

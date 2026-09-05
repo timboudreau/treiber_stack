@@ -16,7 +16,7 @@ name = "treiber_stack"
 path = "src/lib.rs"
 
 [features]
-default = [ "stack" ]
+default = [ "stack", "queue" ]
 queue = [ "dep:portable-atomic" ]
 queue-stats = [ "queue" ]
 stack = [ "dep:arc-swap" ]
