@@ -815,7 +815,7 @@ mod treiber_stack_tests {
     #[test]
     fn test_threaded() {
         const THREADS: usize = 8;
-        const MAX: usize = 1000;
+        const MAX: usize = 10000;
         let ts: TreiberStack<Thing> = TreiberStack::default();
         let counter = AtomicUsize::new(0);
         let thread_id = AtomicUsize::new(0);

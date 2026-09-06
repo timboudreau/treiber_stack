@@ -23,15 +23,19 @@
  */
 //! Provides a simplified, `Arc`-free Treiber stack - possibly the simplest
 //! form of one possible in Rust - an opaque queue which items can be pushed
-//! into and popped from.
-#[cfg(any(feature = "queue-stats", test))]
-use std::sync::atomic::AtomicUsize;
-use std::{marker::PhantomData, sync::atomic::Ordering::Relaxed};
+use std::{
+    marker::PhantomData,
+    sync::atomic::{
+        AtomicUsize,
+        Ordering::{Relaxed, SeqCst},
+    },
+};
 
 // Pending: add an option, requiring the nightly compiler, to use the native
 // AtomicU128 on platforms that support it.
 
 type AtomicU128 = portable_atomic::AtomicU128;
+const CLEANUP_GENERATION_CELLS: usize = 16;
 
 #[cfg(not(feature = "queue-read-relaxed"))]
 mod ord {
@@ -77,6 +81,7 @@ mod ord {
 #[derive(Debug)]
 pub struct TreiberQueue<T: Sized + 'static> {
     cell: HeadCell,
+    cleanup: Cleanup<CLEANUP_GENERATION_CELLS>,
     _pd: PhantomData<T>,
 }
 
@@ -87,16 +92,33 @@ impl<T: Sized + 'static> TreiberQueue<T> {
     pub const fn new() -> Self {
         Self {
             cell: HeadCell::new(),
+            cleanup: Cleanup::new(),
             _pd: PhantomData,
         }
     }
 
     #[cfg(any(feature = "queue-stats", test))]
-    /// Some diagnostic stats - the number of items currently leaked and unleaked.
-    /// If this stack is empty, this should return equal numbers.  Stats are per-queue,
+    /// Some diagnostic stats - the number of items currently pushed and popped and structs
+    /// (both values and head-cells) leaked and unleaked.
+    ///
+    /// Cells unleaked will lag the number of pops and will be double the number
+    /// of pushes, minus one for each time the cell was pushed to when it was empty
+    /// (the initial cell head does not need to leak an adjacent head-cell since there
+    /// isn't one) - unleaking cells happens every `n` cells (where `n` is
+    /// implementation-determined) in generations to avoid double-freeing head cells.
+    ///
+    /// If this stack is empty, pushes should equal pops.  Stats are per-queue,
     /// not global, and only collected if the feature `queue-stats` is enabled.
-    pub fn stats(&self) -> (usize, usize) {
+    pub fn stats(&self) -> (usize, usize, usize, usize) {
         self.cell.stats()
+    }
+
+    #[cfg(any(feature = "queue-stats", test))]
+    /// Returns a best-effort tally of the number of pushes minus the number of pops
+    /// this queue has seen. The result should be treated as a hint, not ground-truth
+    /// (as should all reports of the internal state of a lockless structure).
+    pub fn approximate_len(&self) -> usize {
+        self.cell.approximate_len()
     }
 
     /// Push an item onto the queue. Returns true if the queue was empty prior to this
@@ -114,24 +136,33 @@ impl<T: Sized + 'static> TreiberQueue<T> {
     /// assert_eq!(n, Some(23));
     /// assert!(q.is_empty());
     /// ```
+    #[inline(always)]
     pub fn push(&self, t: T) -> bool {
         self.cell.push::<T>(t)
     }
 
     /// Convenience method to push an item onto the queue that the
     /// caller already has boxed, such as boxed dyn functions.
+    #[inline(always)]
     pub fn push_boxed(&self, t: Box<T>) -> bool {
         self.cell.push_boxed::<T>(t)
     }
 
     /// Pop an item off of the queue.
+    #[inline(always)]
     pub fn pop(&self) -> Option<T> {
-        self.cell.pop::<T>()
+        if let Some((item, inner)) = self.cell.pop::<T>() {
+            self.cleanup.push(inner, &self.cell);
+            Some(item)
+        } else {
+            None
+        }
     }
 
     /// Determine if the queue is currently empty (which may not be true a nanosecond
     /// after this method returns); useful to spin a thread pulling work from a queue
     /// to avoid liveness issues.
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.cell.is_empty()
     }
@@ -146,12 +177,12 @@ impl<T: Sized + 'static> TreiberQueue<T> {
     /// assert_eq!(drained, vec![4, 3, 2, 1, 0]);
     /// ```
     pub fn drain(&self) -> Vec<T> {
-        self.cell.drain::<T>()
+        self.cell.drain::<_, T>(&self.cleanup)
     }
 
     /// Drain up to `n_items` items from the queue.
     pub fn drain_no_more_than(&self, n_items: usize) -> Vec<T> {
-        self.cell.drain_no_more_than::<T>(n_items)
+        self.cell.drain_no_more_than::<_, T>(n_items, &self.cleanup)
     }
 }
 
@@ -196,6 +227,10 @@ struct HeadCell {
     leak_counter: AtomicUsize,
     #[cfg(any(feature = "queue-stats", test))]
     unleak_counter: AtomicUsize,
+    #[cfg(any(feature = "queue-stats", test))]
+    pop_counter: AtomicUsize,
+    #[cfg(any(feature = "queue-stats", test))]
+    push_counter: AtomicUsize,
 }
 
 impl HeadCell {
@@ -206,17 +241,32 @@ impl HeadCell {
             leak_counter: AtomicUsize::new(0),
             #[cfg(any(feature = "queue-stats", test))]
             unleak_counter: AtomicUsize::new(0),
+            #[cfg(any(feature = "queue-stats", test))]
+            pop_counter: AtomicUsize::new(0),
+            #[cfg(any(feature = "queue-stats", test))]
+            push_counter: AtomicUsize::new(0),
         }
     }
 
+    /// Returns pushes, pops, leaks, unleaks
     #[cfg(any(feature = "queue-stats", test))]
-    fn stats(&self) -> (usize, usize) {
+    fn stats(&self) -> (usize, usize, usize, usize) {
         (
+            self.push_counter.load(Relaxed),
+            self.pop_counter.load(Relaxed),
             self.leak_counter.load(Relaxed),
             self.unleak_counter.load(Relaxed),
         )
     }
 
+    #[cfg(any(feature = "queue-stats", test))]
+    fn approximate_len(&self) -> usize {
+        let pushes = self.leak_counter.load(Relaxed);
+        let pops = self.pop_counter.load(Relaxed);
+        if pops > pushes { 0 } else { pushes - pops }
+    }
+
+    #[inline(always)]
     fn unleak<T: Sized + 'static>(&self, p: *mut T) -> T {
         let bx = unsafe { Box::from_raw(p) };
         #[cfg(any(feature = "queue-stats", test))]
@@ -224,18 +274,21 @@ impl HeadCell {
         *bx
     }
 
+    #[inline(always)]
     fn leak<T: Sized + 'static>(&self, p: T) -> *mut T {
         self.leak_boxed::<T>(Box::new(p))
     }
 
+    #[inline(always)]
     fn leak_boxed<T: Sized + 'static>(&self, p: Box<T>) -> *mut T {
         #[cfg(any(feature = "queue-stats", test))]
         self.leak_counter.fetch_add(1, Relaxed);
         Box::leak(p)
     }
 
-    /// Remove the last inserted item from the queue.
-    fn pop<T: Sized + 'static>(&self) -> Option<T> {
+    /// Remove the last inserted item from the queue.  Returns the popped item, and if present,
+    /// the address of the head that formerly contained it so it can be unleaked.
+    fn pop<T: Sized + 'static>(&self) -> Option<(T, usize)> {
         let res = self
             .state
             .fetch_update(ord::WRITE_ORDERING, ord::READ_ORDERING, |old| {
@@ -250,10 +303,9 @@ impl HeadCell {
                 let cell = LinkCell(old);
                 if let Some(value) = cell.value::<T>() {
                     let unleaked = self.unleak(value);
-                    if let Some(c1) = cell.inner::<LinkCell>() {
-                        self.unleak(c1);
-                    }
-                    return Some(unleaked);
+                    #[cfg(any(feature = "queue-stats", test))]
+                    self.pop_counter.fetch_add(1, Relaxed);
+                    return Some((unleaked, cell.inner_bits()));
                 } else {
                     return None;
                 }
@@ -266,6 +318,7 @@ impl HeadCell {
         }
     }
 
+    #[inline(always)]
     fn push<T: Sized + 'static>(&self, val: T) -> bool {
         self.push_boxed::<T>(Box::new(val))
     }
@@ -310,6 +363,8 @@ impl HeadCell {
             });
         match res {
             Ok(old) => {
+                #[cfg(any(feature = "queue-stats", test))]
+                self.push_counter.fetch_add(1, Relaxed);
                 return old == 0;
             }
             Err(e) => {
@@ -324,21 +379,27 @@ impl HeadCell {
     }
 
     /// Empty the entire contents of the queue.  The result will be in LIFO order.
-    fn drain<T: Sized + 'static>(&self) -> Vec<T> {
+    fn drain<const N: usize, T: Sized + 'static>(&self, cleanup: &Cleanup<N>) -> Vec<T> {
         let mut result = Vec::<T>::new();
         while !self.is_empty() {
-            if let Some(item) = self.pop() {
+            if let Some((item, inner)) = self.pop() {
                 result.push(item);
+                cleanup.push(inner, self);
             }
         }
         result
     }
 
-    fn drain_no_more_than<T: Sized + 'static>(&self, n_items: usize) -> Vec<T> {
+    fn drain_no_more_than<const N: usize, T: Sized + 'static>(
+        &self,
+        n_items: usize,
+        cleanup: &Cleanup<N>,
+    ) -> Vec<T> {
         let mut result = Vec::<T>::new();
         while !self.is_empty() {
-            if let Some(item) = self.pop() {
+            if let Some((item, inner)) = self.pop() {
                 result.push(item);
+                cleanup.push(inner, self);
                 if result.len() == n_items {
                     break;
                 }
@@ -367,14 +428,17 @@ impl LinkCell {
         Self::new(val)
     }
 
+    #[inline(always)]
     const fn value_bits(&self) -> usize {
         (self.0 >> 64) as usize
     }
 
+    #[inline(always)]
     const fn inner_bits(&self) -> usize {
         (self.0 & MASK_LOWER) as usize
     }
 
+    #[inline(always)]
     const fn set_inner(&mut self, inner: usize) {
         let masked = self.0 & MASK_UPPER; // preserved the value bits
         debug_assert!(masked != 0, "Cell should not be empty");
@@ -383,10 +447,12 @@ impl LinkCell {
         debug_assert!(self.value_bits() != 0, "Value bits cleared?");
     }
 
+    #[inline(always)]
     fn set_inner_ptr(&mut self, inner: *mut Self) {
         self.set_inner(inner.addr());
     }
 
+    #[allow(dead_code)]
     const fn inner<T: Sized + 'static>(&self) -> Option<*mut T> {
         let addr = (self.0 & MASK_LOWER) as usize;
         if addr != 0 {
@@ -397,6 +463,7 @@ impl LinkCell {
         }
     }
 
+    #[inline(always)]
     const fn value<T: Sized + 'static>(&self) -> Option<*mut T> {
         let addr = ((self.0 & MASK_UPPER) >> 64) as usize;
         if addr != 0 {
@@ -407,6 +474,7 @@ impl LinkCell {
         }
     }
 
+    #[inline(always)]
     const fn next_cell_value(&self) -> u128 {
         let next_addr = (self.0 & MASK_LOWER) as usize;
         if next_addr != 0 {
@@ -415,6 +483,125 @@ impl LinkCell {
             borr.0
         } else {
             0
+        }
+    }
+}
+
+/// We need to delay dropping head-cells an coalesce the addresses, as two operations
+/// can (and rarely do) result in attempting to drop the same head cell twice.
+struct Cleanup<const N: usize> {
+    a_set: [AtomicUsize; N],
+    b_set: [AtomicUsize; N],
+    cursor: AtomicUsize,
+}
+
+impl<const N: usize> std::fmt::Debug for Cleanup<N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let pos = self.cursor.load(Relaxed) % N;
+        f.debug_struct("Cleanup")
+            .field("cursor", &self.cursor)
+            .field("position", &pos)
+            .finish()
+    }
+}
+
+impl<const N: usize> Cleanup<N> {
+    const fn new() -> Self {
+        let a_set: [AtomicUsize; N] = [const { AtomicUsize::new(0) }; N];
+        let b_set: [AtomicUsize; N] = [const { AtomicUsize::new(0) }; N];
+        let cursor: AtomicUsize = AtomicUsize::new(0);
+        Self {
+            a_set,
+            b_set,
+            cursor,
+        }
+    }
+
+    #[inline]
+    fn push(&self, ptr: usize, owner: &HeadCell) {
+        if ptr == 0 {
+            // Null pointer; do nothing.  We check this here rather than in pop()
+            // to ensure it is always done by doing it only in one place.
+            return;
+        }
+        // We keep the cursor incrementing monotonically
+        let pos = self
+            .cursor
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Position of the cursor relative to the start of the target buffer
+        let offset = pos % N;
+        // Which buffer to use, so we are always visiting items old enough to contain both copies
+        // of the same address from a concurrent pop.
+        let generation = pos / N;
+        let (target, other) = if generation.is_multiple_of(2) {
+            (&self.a_set, &self.b_set)
+        } else {
+            (&self.b_set, &self.a_set)
+        };
+        // Take the old value, in case it is non-zero
+        let old = target[offset].swap(ptr, std::sync::atomic::Ordering::SeqCst);
+
+        let run_cleanup = old != 0 || (offset == 0 && generation > 0);
+
+        if run_cleanup {
+            let _cleaned = Self::cleanup(other, old, owner);
+        } else {
+            Self::cleanup_one(old, owner);
+        }
+    }
+
+    fn cleanup(arr: &[AtomicUsize; N], prev: usize, owner: &HeadCell) -> usize {
+        // Using a set solves prunes duplicates generated by concurrent pops:
+        let mut set = std::collections::BTreeSet::new();
+        if prev != 0 {
+            set.insert(prev);
+        }
+        let mut encountered = 0_usize;
+        for item in arr.iter() {
+            let val = item.swap(0, SeqCst);
+            if val != 0 {
+                encountered += 1;
+                set.insert(val);
+            }
+        }
+        if set.len() < encountered {
+            println!("ENCOUNTERED DUPS: {}", encountered - set.len());
+        }
+        let mut cleaned_up = 0;
+        for addr in set {
+            if Self::cleanup_one(addr, owner) {
+                cleaned_up += 1;
+            }
+        }
+        cleaned_up
+    }
+
+    fn cleanup_one(addr: usize, owner: &HeadCell) -> bool {
+        if addr == 0 {
+            return false;
+        }
+        let pt = std::ptr::with_exposed_provenance_mut::<LinkCell>(addr);
+        owner.unleak(pt);
+        true
+    }
+
+    // used only in drop, where we don't have a reference to the owner
+    fn unleak(p: *mut LinkCell) -> LinkCell {
+        let bx = unsafe { Box::from_raw(p) };
+        *bx
+    }
+}
+
+impl<const N: usize> Drop for Cleanup<N> {
+    fn drop(&mut self) {
+        for arr in [&self.a_set, &self.b_set] {
+            for p in arr.iter() {
+                let addr = p.swap(0, SeqCst);
+                if addr != 0 {
+                    let pt = std::ptr::with_exposed_provenance_mut::<LinkCell>(addr);
+                    Self::unleak(pt);
+                }
+            }
         }
     }
 }
@@ -431,13 +618,15 @@ mod queue_tests {
         time::{Duration, Instant, SystemTime},
     };
 
+    static CLEANUP: Cleanup<16> = Cleanup::new();
+
     #[test]
     fn test_head_cell() {
+        const N_ITEMS: usize = 10;
         let cell = HeadCell::default();
-
         let mut items = Vec::new();
 
-        for i in 0..10 {
+        for i in 0..N_ITEMS {
             let t = Thing::new(i + 1);
             items.push(t.clone());
             cell.push(t);
@@ -445,12 +634,16 @@ mod queue_tests {
         assert!(!cell.is_empty());
         items.reverse();
 
-        let (leaks, unleaks) = cell.stats();
-        assert!(leaks == 19);
-        assert!(unleaks == 0);
-        let contents = cell.drain::<Thing>();
-        let (leaks, unleaks) = cell.stats();
-        assert_eq!(leaks, unleaks);
+        let (pushes, pops, leaks, unleaks) = cell.stats();
+        assert_eq!(leaks, 19, "Wrong number of leaks before drain");
+        assert_eq!(pushes, 10, "Wrong number of pushes before drain");
+        assert_eq!(pops, 0, "Wrong number of pops before drain");
+        assert_eq!(unleaks, 0, "Wrong number of unleaks before drain");
+        let contents = cell.drain::<_, Thing>(&CLEANUP);
+        let (pushes, pops, leaks, unleaks) = cell.stats();
+        assert_eq!(leaks, 19, "Wrong number of leaks after drain");
+        assert_eq!(pushes, pops, "Pushes does not equal pops after drain");
+        assert_eq!(10, unleaks, "Wrong number of unleaks after drain");
         assert!(cell.is_empty());
         assert_eq!(items, contents);
     }

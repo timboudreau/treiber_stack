@@ -9,7 +9,7 @@ This is a handy data structure in any scenario where tasks on multiple threads
 you can't afford blocking the thread in question due to contention.
 
 To use, simply add to your `Cargo.toml`
-`treiber_stack = "1.2.2"`
+`treiber_stack = "1.2.3"`
 
 
 What's Here?
